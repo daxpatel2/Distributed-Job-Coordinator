@@ -4,106 +4,168 @@ package coord.v1;
 
 option go_package = "example.com/mini-coordinator/gen/coordv1;coordv1";
 
-// a service contains one or more remote procedure calls, we define the gRPC functions in here
-// Like many RPC systems, gRPC is based around the idea of defining a service, specifying the methods that can be called remotely with their parameters and return types.
+// Coordinator is the central service responsible for managing the lifecycle of workers and jobs.
+// It handles worker registration, failure detection (via heartbeats), job queue management,
+// and job assignment.
 service Coordinator {
-  // this is a function definition in gRPC
-  // // Workers call this once to join the cluster and get a worker_id.
+  // RegisterWorker allows a new worker to join the cluster.
+  // The coordinator assigns a unique worker_id and provides configuration like the heartbeat interval.
   rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
-  // Workers send periodic heartbeats. Coordinator uses this for failure detection.
+
+  // Heartbeat is sent periodically by workers to indicate liveness.
+  // If the coordinator does not receive a heartbeat within a configured timeout,
+  // the worker is considered dead and its assigned jobs are requeued.
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
-  // Workers ask for work; coordinator assigns a job if available.
+
+  // PollWork is called by workers to request a new job.
+  // If a job is available, it is assigned to the worker with a lease.
   rpc PollWork(PollWorkRequest) returns (PollWorkResponse);
-  // Workers report job completion or failure.
+
+  // ReportWork is used by workers to report the completion or failure of a job.
+  // It also allows updating the status of a running job.
   rpc ReportWork(ReportWorkRequest) returns (ReportWorkResponse);
-  // Users/submitters add jobs to the queue.
+
+  // SubmitJob allows external clients (or workers) to submit a new job to the queue.
   rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse);
-  // For debugging: list jobs and workers.
+
+  // GetStatus returns the current state of the cluster, including connected workers and job statuses.
+  // Useful for debugging and monitoring.
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
 }
 
+// RegisterWorkerRequest contains the metadata for a worker joining the cluster.
 message RegisterWorkerRequest {
+  // The hostname or IP address of the worker. Used for display and debugging.
   string hostname = 1;
+  // arbitrary key-value pairs to describe the worker (e.g., "gpu"="true", "zone"="us-west").
   map<string, string> labels = 2;
 }
 
+// RegisterWorkerResponse contains the credentials and config for the registered worker.
 message RegisterWorkerResponse {
+  // The unique ID assigned to the worker by the coordinator.
   string worker_id = 1;
+  // The interval in milliseconds at which the worker should send heartbeats.
   int64 heartbeat_interval_ms = 2;
 }
 
+// HeartbeatRequest identifies the worker sending the heartbeat.
 message HeartbeatRequest {
   string worker_id = 1;
 }
+
+// HeartbeatResponse contains synchronization info.
 message HeartbeatResponse {
+  // The current time on the coordinator, useful for clock synchronization estimates.
   int64 server_time_unix_ms = 1;
 }
+
+// PollWorkRequest identifies the worker requesting work.
 message PollWorkRequest {
   string worker_id = 1;
 }
+
+// PollWorkResponse contains either a job assignment or an instruction to retry later.
 message PollWorkResponse {
   oneof result {
+    // A job has been assigned.
     AssignedJob job = 1;
+    // No job is currently available.
     NoJob no_job = 2;
   }
 }
+
+// AssignedJob represents a job that has been locked to a worker.
 message AssignedJob {
+  // The unique identifier of the job.
   string job_id = 1;
+  // The data payload required to execute the job.
   string payload = 2;
-  int64 lease_duration_ms = 3; // worker "owns" job for this long unless it reports done
+  // The duration in milliseconds for which the job is leased to the worker.
+  // The worker must report status or completion before this time expires,
+  // otherwise the coordinator will reclaim the job.
+  int64 lease_duration_ms = 3;
+  // The attempt number for this job (starts at 1).
   int32 attempt = 4;
 }
+
+// NoJob indicates that the queue is empty or no jobs are eligible.
 message NoJob {
+  // Recommendation for how long to wait before polling again.
   int64 retry_after_ms = 1;
 }
+
+// ReportWorkRequest updates the status of a job.
 message ReportWorkRequest {
   string worker_id = 1;
   string job_id = 2;
+  // The new status of the job.
   WorkStatus status = 3;
+  // Optional message describing the result or error details.
   string message = 4;
+  // The attempt number being reported. Used for fencing zombie workers.
   int32 attempt = 5;
 }
+
 message ReportWorkResponse {}
 
+// WorkStatus represents the outcome of a job execution.
 enum WorkStatus {
   WORK_STATUS_UNSPECIFIED = 0;
+  // Job completed successfully.
   WORK_STATUS_SUCCEEDED = 1;
+  // Job failed during execution.
   WORK_STATUS_FAILED = 2;
 }
 
+// SubmitJobRequest wraps the job payload.
 message SubmitJobRequest {
   string payload = 1;
 }
+
+// SubmitJobResponse returns the ID of the created job.
 message SubmitJobResponse {
   string job_id = 1;
 }
 
 message GetStatusRequest {}
+
+// GetStatusResponse provides a snapshot of the cluster state.
 message GetStatusResponse {
   repeated WorkerInfo workers = 1;
   repeated JobInfo jobs = 2;
 }
 
+// WorkerInfo describes a registered worker.
 message WorkerInfo {
   string worker_id = 1;
   string hostname = 2;
   int64 last_heartbeat_unix_ms = 3;
 }
 
+// JobInfo describes the state of a job in the system.
 message JobInfo {
   string job_id = 1;
   string payload = 2;
   JobState state = 3;
   string assigned_worker_id = 4;
+  // The time when the current lease expires (if running).
   int64 lease_expires_unix_ms = 5;
+  // The last status message or error received.
   string last_message = 6;
 }
 
+// JobState tracks the lifecycle of a job.
 enum JobState {
   JOB_STATE_UNSPECIFIED = 0;
+  // Job is in the queue waiting for a worker.
   JOB_STATE_PENDING = 1;
+  // Job is currently assigned to a worker.
   JOB_STATE_RUNNING = 2;
+  // Job completed successfully.
   JOB_STATE_SUCCEEDED = 3;
+  // Job failed (potentially after retries).
   JOB_STATE_FAILED = 4;
+  // Job was running but failed or timed out, and has been added back to the queue.
   JOB_STATE_REQUEUED = 5;
 }

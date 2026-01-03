@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	coordv1 "example.com/mini-coordinator/gen/example.com/mini-coordinator/gen/coordv1"
+	coordv1 "example.com/mini-coordinator/mini-coordinator/gen/example.com/mini-coordinator/gen/coordv1"
 )
 
 const (
@@ -16,29 +16,37 @@ const (
 	reaperInterval = 1 * time.Second
 )
 
+// JobState represents the current state of a job in its lifecycle.
 type JobState int
 
 const (
-	JobPending JobState = iota
-	JobRunning
-	JobSucceeded
-	JobFailed
-	JobRequeued
+	JobPending   JobState = iota // Job is waiting in the queue.
+	JobRunning                   // Job has been assigned to a worker and is executing.
+	JobSucceeded                 // Job completed successfully.
+	JobFailed                    // Job failed permanently.
+	JobRequeued                  // Job failed or timed out and was added back to the queue.
 )
 
+// Job represents a unit of work to be executed by a worker.
+// It tracks the payload, current state, assignment, and retry history.
 type Job struct {
-	ID             string
-	Payload        string
-	State          JobState
+	ID      string
+	Payload string
+	State   JobState
+	// AssignedWorker is the ID of the worker currently processing this job. Empty if not assigned.
 	AssignedWorker string
-	LeaseExpiresAt time.Time // The Coordinator says, "You have this job for 10 seconds. If I don't hear from you by then, I'm taking it back and giving it to someone else."
+	// LeaseExpiresAt is the deadline for the worker to report status.
+	// The Coordinator says, "You have this job for 10 seconds. If I don't hear from you by then, I'm taking it back and giving it to someone else."
+	LeaseExpiresAt time.Time
 	LastMessage    string
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
-	Attempts       int
+	// Attempts tracks how many times this job has been assigned. Used for fencing and retry limits.
+	Attempts int
 }
 
-// Worker - the citizen of the distributed system
+// Worker represents a connected compute node in the distributed system.
+// It holds metadata and liveness information.
 type Worker struct {
 	ID            string
 	Hostname      string
@@ -47,20 +55,21 @@ type Worker struct {
 	RegisteredAt  time.Time
 }
 
-// Coordinator - the government of the distributed system. Has workers and jobs that it manages
+// Coordinator is the central authority of the distributed system.
+// It manages the registry of workers, the lifecycle of jobs, and fault tolerance mechanisms.
 type Coordinator struct {
 	coordv1.UnimplementedCoordinatorServer
 	mu sync.Mutex
 
 	workers map[string]*Worker
 	jobs    map[string]*Job
-	queue   []string //jobIds in FIFO order
+	queue   []string // Job IDs in FIFO order
 
 	heartbeatInterval time.Duration
 	leaseDuration     time.Duration
 }
 
-// NewCoordinator initialize the coordinator
+// NewCoordinator initializes and returns a new Coordinator instance with default configuration.
 func NewCoordinator() *Coordinator {
 	return &Coordinator{
 		workers:           make(map[string]*Worker),
@@ -71,14 +80,12 @@ func NewCoordinator() *Coordinator {
 	}
 }
 
-/*
-	Must follow the gRPC pattern of:
-
-Receiver: pointer to a struct (e.g., *Coordinator).
-First Argument: Always context.Context.
-Second Argument: A pointer to the generated Request struct (e.g., *coordv1.RegisterWorkerRequest).
-Return Values: A pointer to the generate Response struct and an error.
-*/
+// RegisterWorker handles the initial registration of a worker node.
+// It assigns a unique ID and records the worker's presence.
+//
+// Context: gRPC request context.
+// Request: Contains worker metadata like hostname.
+// Returns: A response containing the assigned WorkerID and heartbeat configuration.
 func (c *Coordinator) RegisterWorker(ctx context.Context, req *coordv1.RegisterWorkerRequest) (*coordv1.RegisterWorkerResponse, error) {
 	if req.GetHostname() == "" {
 		return nil, fmt.Errorf("hostname is required")
@@ -106,7 +113,9 @@ func (c *Coordinator) RegisterWorker(ctx context.Context, req *coordv1.RegisterW
 	}, nil
 }
 
-// Heartbeat grpc call: request a heartbeat, returns a heartbeat response. This function simply keeps the worker alive by setting the new heartbeat to time.now()
+// Heartbeat processes a liveness signal from a worker.
+// It updates the LastHeartbeat timestamp for the worker, preventing it from being reaped.
+// Returns the current server time to help with clock drift estimation (though not strictly NTP).
 func (c *Coordinator) Heartbeat(ctx context.Context, req *coordv1.HeartbeatRequest) (*coordv1.HeartbeatResponse, error) {
 	now := time.Now()
 	c.mu.Lock()
@@ -126,6 +135,8 @@ func (c *Coordinator) Heartbeat(ctx context.Context, req *coordv1.HeartbeatReque
 	}, nil
 }
 
+// GetStatus returns a snapshot of the cluster state, including all workers and jobs.
+// This is primarily used for debugging and monitoring.
 func (c *Coordinator) GetStatus(ctx context.Context, req *coordv1.GetStatusRequest) (*coordv1.GetStatusResponse, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -171,7 +182,8 @@ func toProtoJobState(s JobState) coordv1.JobState {
 	}
 }
 
-// SubmitJob -
+// SubmitJob accepts a new job payload from a client and adds it to the queue.
+// The job starts in the JobPending state.
 func (c *Coordinator) SubmitJob(ctx context.Context, req *coordv1.SubmitJobRequest) (*coordv1.SubmitJobResponse, error) {
 	if req.GetPayload() == "" {
 		return nil, fmt.Errorf("payload is required")
@@ -195,6 +207,8 @@ func (c *Coordinator) SubmitJob(ctx context.Context, req *coordv1.SubmitJobReque
 	return &coordv1.SubmitJobResponse{JobId: jobID}, nil
 }
 
+// PollWork checks the job queue for available work and assigns it to the requesting worker.
+// It enforces FIFO ordering and lease management.
 func (c *Coordinator) PollWork(ctx context.Context, req *coordv1.PollWorkRequest) (*coordv1.PollWorkResponse, error) {
 	workerID := req.GetWorkerId()
 	now := time.Now()
@@ -207,22 +221,28 @@ func (c *Coordinator) PollWork(ctx context.Context, req *coordv1.PollWorkRequest
 		return nil, fmt.Errorf("unknown worker_id: %s", workerID)
 	}
 
+	// Iterate through the queue to find the first assignable job.
+	// We might encounter job IDs that were already processed (if we didn't clean up queue perfectly)
+	// or jobs that aren't in a pending state.
 	for len(c.queue) > 0 {
 		jobID := c.queue[0]
 		c.queue = c.queue[1:]
 		j, ok := c.jobs[jobID]
 		if !ok {
+			// Job might have been deleted?
 			continue
 		}
-		//find a pending job
+		// find a pending job
 		if j.State != JobPending && j.State != JobRequeued {
 			continue
 		}
 
-		//found a pending job, set its parameters and assign to worker
+		// found a pending job, set its parameters and assign to worker
 		j.State = JobRunning
 		j.AssignedWorker = workerID
 		j.Attempts++
+		// Lease logic: The worker has exclusive rights to this job for c.leaseDuration.
+		// If they don't report back, the reaper will take it away.
 		j.LeaseExpiresAt = now.Add(c.leaseDuration)
 		j.UpdatedAt = now
 		j.LastMessage = "assigned"
@@ -239,6 +259,7 @@ func (c *Coordinator) PollWork(ctx context.Context, req *coordv1.PollWorkRequest
 		}, nil
 	}
 
+	// No work available, tell worker to back off.
 	return &coordv1.PollWorkResponse{
 		Result: &coordv1.PollWorkResponse_NoJob{
 			NoJob: &coordv1.NoJob{RetryAfterMs: 500},
@@ -246,6 +267,8 @@ func (c *Coordinator) PollWork(ctx context.Context, req *coordv1.PollWorkRequest
 	}, nil
 }
 
+// ReportWork updates the status of a job based on a worker's report.
+// It handles success, failure, and fencing (ensuring only the valid owner can report).
 func (c *Coordinator) ReportWork(ctx context.Context, req *coordv1.ReportWorkRequest) (*coordv1.ReportWorkResponse, error) {
 	now := time.Now()
 
@@ -256,7 +279,9 @@ func (c *Coordinator) ReportWork(ctx context.Context, req *coordv1.ReportWorkReq
 		return nil, fmt.Errorf("unknown job_id: %s", req.GetJobId())
 	}
 
-	// Fencing-lite: only the currently assigned worker can report
+	// Fencing: Ensure the reporting worker is the current owner and is working on the current attempt.
+	// This prevents a "zombie" worker (one that was thought dead but came back) from overwriting
+	// the work of a new worker assigned to the same job.
 	if int(req.GetAttempt()) != j.Attempts {
 		return nil, fmt.Errorf("stale report: job=%s got_attempt=%d current_attempt=%d",
 			j.ID, req.GetAttempt(), j.Attempts)
@@ -292,7 +317,10 @@ func (c *Coordinator) ReportWork(ctx context.Context, req *coordv1.ReportWorkReq
 	return &coordv1.ReportWorkResponse{}, nil
 }
 
-// RunReaper : background go routine to reap dead workers
+// RunReaper starts a background goroutine that periodically checks for:
+// 1. Dead workers (missed heartbeats).
+// 2. Expired job leases.
+// It should be run in a separate goroutine.
 func (c *Coordinator) RunReaper(stopCh <-chan struct{}) {
 	ticker := time.NewTicker(reaperInterval)
 	defer ticker.Stop()
@@ -307,38 +335,46 @@ func (c *Coordinator) RunReaper(stopCh <-chan struct{}) {
 	}
 }
 
+// reapDeadWorkers implements the failure detection and recovery logic.
+// It scans the worker registry and job list to enforce soft-state membership and lease guarantees.
 func (c *Coordinator) reapDeadWorkers() {
 	now := time.Now()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// find dead workers
+	// 1. Detect dead workers
+	// If a worker hasn't sent a heartbeat within workerTimeout, we assume it crashed or is partitioned.
 	dead := make(map[string]struct{})
 	for id, w := range c.workers {
 		if now.Sub(w.LastHeartbeat) > workerTimeout {
 			fmt.Printf("worker %s timed out (last hb %v ago)\n", id, now.Sub(w.LastHeartbeat))
 			delete(c.workers, id)
+			dead[id] = struct{}{}
 		}
 	}
 
-	// reclaim jobs from dead workers or expired leases
+	// 2. Reclaim jobs
+	// We look for jobs that need to be re-assigned.
 	for _, j := range c.jobs {
 		if j.State != JobRunning {
 			continue
 		}
-		// see if the worker for this job is dead
+		// Condition A: The worker assigned to this job was just marked dead.
 		_, workerDead := dead[j.AssignedWorker]
-		// see if lease for job has expired
+
+		// Condition B: The lease time has passed.
+		// Even if the worker is "alive" (sending heartbeats), it might be stuck or slow on this specific job.
 		leaseExpired := !j.LeaseExpiresAt.IsZero() && now.After(j.LeaseExpiresAt)
 
-		// either case reap the job and add it to queue
+		// In either case, we must recover the job to ensure it eventually gets done.
 		if workerDead || leaseExpired {
 			reason := "lease expired"
 			if workerDead {
 				reason = "worker dead"
 			}
 
+			// Transition to Requeued state so it can be picked up by PollWork
 			j.State = JobRequeued
 			j.AssignedWorker = ""
 			j.LeaseExpiresAt = time.Time{}
