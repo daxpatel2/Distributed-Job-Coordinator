@@ -4,60 +4,83 @@ package ps.v1;
 
 option go_package = "example.com/mini-coordinator/gen/psv1;psv1";
 
+// ParameterServer provides a distributed key-value store specialized for machine learning models.
+// It supports initializing models, pulling weights, and pushing gradients for SGD updates.
 service ParameterServer {
-  // Initialize a model (weights vector) for a given model_id.
+  // InitModel initializes a new model with a starting set of weights.
+  // This must be called before any workers try to pull weights.
   rpc InitModel(InitModelRequest) returns (InitModelResponse);
 
-  // Get latest weights for a model_id.
+  // PullWeights retrieves the current weights for a model.
+  // Workers use this to get the latest model parameters before computing gradients.
   rpc PullWeights(PullWeightsRequest) returns (PullWeightsResponse);
 
-  // Push gradients for a model_id; server applies update and returns new version.
+  // PushGradients applies calculated gradients to the model using a learning rate.
+  // This implements the "Parameter Server" update step (Weights = Weights - LR * Gradients).
+  // Returns the new version number of the model.
   rpc PushGradients(PushGradientsRequest) returns (PushGradientsResponse);
 
-  // Debug
+  // GetPSStatus returns the status of all managed models.
   rpc GetPSStatus(GetPSStatusRequest) returns (GetPSStatusResponse);
 }
 
+// InitModelRequest creates a new model entry.
 message InitModelRequest {
   string model_id = 1;
+  // The initial weight vector.
   repeated float weights = 2;
 }
 
+// InitModelResponse confirms initialization.
 message InitModelResponse {
+  // The initial version (usually 1).
   int64 version = 1;
 }
 
+// PullWeightsRequest asks for the weights of a specific model.
 message PullWeightsRequest {
   string model_id = 1;
-  // Optional: worker can ask "only if newer than"
+  // Optimization: If provided, the server may return empty weights if the
+  // current version on the server is not greater than min_version.
   int64 min_version = 2;
 }
 
+// PullWeightsResponse contains the model weights and version.
 message PullWeightsResponse {
+  // The current weight vector. May be empty if min_version optimization was used.
   repeated float weights = 1;
+  // The current version of the model on the server.
   int64 version = 2;
 }
 
+// PushGradientsRequest sends gradients to update the model.
 message PushGradientsRequest {
   string model_id = 1;
-  // Worker computed gradient for the current weights.
+  // The gradient vector computed by the worker.
+  // Must have the same dimension as the model weights.
   repeated float gradients = 2;
-  // Learning rate (to keep server simple).
+  // The learning rate to use for this update step.
   float learning_rate = 3;
 }
 
+// PushGradientsResponse confirms the update.
 message PushGradientsResponse {
+  // The new version of the model after applying gradients.
   int64 new_version = 1;
 }
 
 message GetPSStatusRequest {}
 
+// ModelStatus describes a single managed model.
 message ModelStatus {
   string model_id = 1;
+  // Current version of the weights.
   int64 version = 2;
+  // Dimension of the weight vector.
   int32 dim = 3;
 }
 
+// GetPSStatusResponse lists all models.
 message GetPSStatusResponse {
   repeated ModelStatus models = 1;
 }
