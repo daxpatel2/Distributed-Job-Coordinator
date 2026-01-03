@@ -2,6 +2,9 @@
 # since it will be generated after the command finishes
 gen:
 	protoc \
-	  --go_out=./gen --go_opt=paths=source_relative \
-	  --go-grpc_out=./gen --go-grpc_opt=paths=source_relative \
-	  proto/coord.proto
+	  --go_out=./gen \
+	  --go-grpc_out=./gen \
+	  proto/coord.proto proto/ps.proto
+
+tidy:
+	go mod tidy

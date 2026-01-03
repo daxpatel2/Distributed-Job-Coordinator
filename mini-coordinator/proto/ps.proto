@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package ps.v1;
+
+option go_package = "example.com/mini-coordinator/gen/psv1;psv1";
+
+service ParameterServer {
+  // Initialize a model (weights vector) for a given model_id.
+  rpc InitModel(InitModelRequest) returns (InitModelResponse);
+
+  // Get latest weights for a model_id.
+  rpc PullWeights(PullWeightsRequest) returns (PullWeightsResponse);
+
+  // Push gradients for a model_id; server applies update and returns new version.
+  rpc PushGradients(PushGradientsRequest) returns (PushGradientsResponse);
+
+  // Debug
+  rpc GetPSStatus(GetPSStatusRequest) returns (GetPSStatusResponse);
+}
+
+message InitModelRequest {
+  string model_id = 1;
+  repeated float weights = 2;
+}
+
+message InitModelResponse {
+  int64 version = 1;
+}
+
+message PullWeightsRequest {
+  string model_id = 1;
+  // Optional: worker can ask "only if newer than"
+  int64 min_version = 2;
+}
+
+message PullWeightsResponse {
+  repeated float weights = 1;
+  int64 version = 2;
+}
+
+message PushGradientsRequest {
+  string model_id = 1;
+  // Worker computed gradient for the current weights.
+  repeated float gradients = 2;
+  // Learning rate (to keep server simple).
+  float learning_rate = 3;
+}
+
+message PushGradientsResponse {
+  int64 new_version = 1;
+}
+
+message GetPSStatusRequest {}
+
+message ModelStatus {
+  string model_id = 1;
+  int64 version = 2;
+  int32 dim = 3;
+}
+
+message GetPSStatusResponse {
+  repeated ModelStatus models = 1;
+}

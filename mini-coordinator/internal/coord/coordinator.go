@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	coordv1 "example.com/mini-coordinator/gen/proto"
+	coordv1 "example.com/mini-coordinator/gen/example.com/mini-coordinator/gen/coordv1"
 )
 
 const (
@@ -67,7 +67,7 @@ func NewCoordinator() *Coordinator {
 		jobs:              make(map[string]*Job),
 		queue:             make([]string, 0),
 		heartbeatInterval: 2 * time.Second,
-		leaseDuration:     30 * time.Second,
+		leaseDuration:     10 * time.Second,
 	}
 }
 

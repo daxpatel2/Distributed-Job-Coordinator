@@ -4,8 +4,10 @@ import (
 	"flag"
 	"fmt"
 
-	coordv1 "example.com/mini-coordinator/gen/proto"
+	coordv1 "example.com/mini-coordinator/gen/example.com/mini-coordinator/gen/coordv1"
+	psv1 "example.com/mini-coordinator/gen/example.com/mini-coordinator/gen/psv1"
 	"example.com/mini-coordinator/internal/coord"
+	"example.com/mini-coordinator/internal/ps"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
@@ -31,12 +33,18 @@ func main() {
 	// create an empty 'dispatch center'
 	grpcServer := grpc.NewServer()
 
-	impl := coord.NewCoordinator()
-	stopCh := make(chan struct{})
-	go impl.RunReaper(stopCh)
+	coordImpl := coord.NewCoordinator()
 
-	coordv1.RegisterCoordinatorServer(grpcServer, impl)
+	coordv1.RegisterCoordinatorServer(grpcServer, coordImpl)
+
+	psImpl := ps.NewServer()
+	psv1.RegisterParameterServerServer(grpcServer, psImpl)
+
 	reflection.Register(grpcServer) // developer feature to self-describe
+
+	stopCh := make(chan struct{})
+	go coordImpl.RunReaper(stopCh)
+
 	fmt.Printf("coordd listening on %s\n", addr)
 	// this is an infinite loop, the server is listening continuously until I cant
 	if err := grpcServer.Serve(lis); err != nil {
