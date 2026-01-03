@@ -1,0 +1,109 @@
+syntax = "proto3";
+
+package coord.v1;
+
+option go_package = "example.com/mini-coordinator/gen/coordv1;coordv1";
+
+// a service contains one or more remote procedure calls, we define the gRPC functions in here
+// Like many RPC systems, gRPC is based around the idea of defining a service, specifying the methods that can be called remotely with their parameters and return types.
+service Coordinator {
+  // this is a function definition in gRPC
+  // // Workers call this once to join the cluster and get a worker_id.
+  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
+  // Workers send periodic heartbeats. Coordinator uses this for failure detection.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  // Workers ask for work; coordinator assigns a job if available.
+  rpc PollWork(PollWorkRequest) returns (PollWorkResponse);
+  // Workers report job completion or failure.
+  rpc ReportWork(ReportWorkRequest) returns (ReportWorkResponse);
+  // Users/submitters add jobs to the queue.
+  rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse);
+  // For debugging: list jobs and workers.
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+}
+
+message RegisterWorkerRequest {
+  string hostname = 1;
+  map<string, string> labels = 2;
+}
+
+message RegisterWorkerResponse {
+  string worker_id = 1;
+  int64 heartbeat_interval_ms = 2;
+}
+
+message HeartbeatRequest {
+  string worker_id = 1;
+}
+message HeartbeatResponse {
+  int64 server_time_unix_ms = 1;
+}
+message PollWorkRequest {
+  string worker_id = 1;
+}
+message PollWorkResponse {
+  oneof result {
+    AssignedJob job = 1;
+    NoJob no_job = 2;
+  }
+}
+message AssignedJob {
+  string job_id = 1;
+  string payload = 2;
+  int64 lease_duration_ms = 3; // worker "owns" job for this long unless it reports done
+  int32 attempt = 4;
+}
+message NoJob {
+  int64 retry_after_ms = 1;
+}
+message ReportWorkRequest {
+  string worker_id = 1;
+  string job_id = 2;
+  WorkStatus status = 3;
+  string message = 4;
+  int32 attempt = 5;
+}
+message ReportWorkResponse {}
+
+enum WorkStatus {
+  WORK_STATUS_UNSPECIFIED = 0;
+  WORK_STATUS_SUCCEEDED = 1;
+  WORK_STATUS_FAILED = 2;
+}
+
+message SubmitJobRequest {
+  string payload = 1;
+}
+message SubmitJobResponse {
+  string job_id = 1;
+}
+
+message GetStatusRequest {}
+message GetStatusResponse {
+  repeated WorkerInfo workers = 1;
+  repeated JobInfo jobs = 2;
+}
+
+message WorkerInfo {
+  string worker_id = 1;
+  string hostname = 2;
+  int64 last_heartbeat_unix_ms = 3;
+}
+
+message JobInfo {
+  string job_id = 1;
+  string payload = 2;
+  JobState state = 3;
+  string assigned_worker_id = 4;
+  int64 lease_expires_unix_ms = 5;
+  string last_message = 6;
+}
+
+enum JobState {
+  JOB_STATE_UNSPECIFIED = 0;
+  JOB_STATE_PENDING = 1;
+  JOB_STATE_RUNNING = 2;
+  JOB_STATE_SUCCEEDED = 3;
+  JOB_STATE_FAILED = 4;
+  JOB_STATE_REQUEUED = 5;
+}
